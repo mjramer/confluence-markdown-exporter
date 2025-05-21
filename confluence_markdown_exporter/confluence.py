@@ -121,15 +121,17 @@ except ValidationError:
 
 converter_settings = ConverterSettings()
 
+retries = Retry(total=10, backoff_factor=2, backoff_max=60, status_forcelist=[502, 503, 504])
+adapter = HTTPAdapter(max_retries=retries)
+confluenceSession = requests.Session()
+confluenceSession.mount('http://', adapter)
+confluenceSession.mount('https://', adapter)
 if api_settings.atlassian_pat:
-    auth_args = {"token": api_settings.atlassian_pat}
+    confluenceSession.headers.update({"Authorization": f"Bearer {api_settings.atlassian_pat}"})
 else:
-    auth_args = {
-        "username": api_settings.atlassian_username,
-        "password": api_settings.atlassian_api_token,
-    }
+    confluenceSession.headers.update({"Authorization": f"Basic {base64.b64encode(f'{api_settings.atlassian_username}:{api_settings.atlassian_api_token}'.encode()).decode()}"})
 
-confluence = ConfluenceApi(url=api_settings.atlassian_url, **auth_args)
+confluence = ConfluenceApi(url=api_settings.atlassian_url, session=confluenceSession, timeout=360)
 jira = Jira(url=api_settings.atlassian_url, **auth_args)
 
 
