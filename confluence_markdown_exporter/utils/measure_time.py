@@ -3,17 +3,15 @@ from collections.abc import Callable
 from collections.abc import Generator
 from contextlib import contextmanager
 from datetime import datetime
-from typing import ParamSpec
 from typing import TypeVar
 
 from dateutil.relativedelta import relativedelta
 
 T = TypeVar("T")
-P = ParamSpec("P")
 
 
-def measure_time(func: Callable[P, T]) -> Callable[P, T]:
-    def wrapper(*args: P.args, **kwargs: P.kwargs) -> T:
+def measure_time(func: Callable[..., T]) -> Callable[..., T]:
+    def wrapper(*args, **kwargs) -> T:
         start_time = time.time()
         result = func(*args, **kwargs)
         end_time = time.time()

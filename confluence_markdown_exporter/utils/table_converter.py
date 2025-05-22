@@ -4,11 +4,11 @@ from bs4 import BeautifulSoup
 from bs4 import Tag
 from markdownify import MarkdownConverter
 from tabulate import tabulate
+from typing import List, Dict, Tuple
 
-
-def pad(rows: list[list[Tag]]) -> list[list[Tag]]:
-    padded: list[list[Tag]] = []
-    occ: dict[tuple[int, int], Tag] = {}
+def pad(rows: List[List[Tag]]) -> List[List[Tag]]:
+    padded: List[List[Tag]] = []
+    occ: Dict[Tuple[int, int], Tag] = {}
     for r, row in enumerate(rows):
         if not row:
             continue
