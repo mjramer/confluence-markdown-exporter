@@ -85,7 +85,7 @@ class ConverterSettings(BaseSettings):
     """Settings for the Markdown converter."""
 
     markdown_style: Literal["GFM", "Obsidian"] = Field(
-        default="GFM",
+        default="Obsidian",
         description="Markdown style to use for conversion. Options: GFM, Obsidian.",
     )
     page_path: str = Field(
@@ -105,10 +105,10 @@ class ConverterSettings(BaseSettings):
         ),
     )
     attachment_path: str = Field(
-        default="{space_name}/attachments/{attachment_file_id}{attachment_extension}",
+        default="{space_name}/attachments/{attachment_title}",
         description=(
             "Path to store attachments. Default: \n"
-            "  {space_name}/attachments/{attachment_file_id}{attachment_extension}\n"
+            "  {space_name}/attachments/{attachment_title}\n"
             "Variables:\n"
             "  {space_key}           - Space key\n"
             "  {space_name}          - Space name\n"
@@ -123,7 +123,7 @@ class ConverterSettings(BaseSettings):
         ),
     )
     attachment_limit: int = Field(
-        default=100,
+        default=1,
         description="Maximum number of attachments to fetch per page. Default: 100.",
     )
     fetch_attachments: bool = Field(
