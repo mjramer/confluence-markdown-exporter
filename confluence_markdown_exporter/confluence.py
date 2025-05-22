@@ -164,7 +164,7 @@ class LoggingHTTPAdapter(HTTPAdapter):
                     )
                 raise
 
-retries = Retry(total=10, backoff_factor=2, backoff_max=60, status_forcelist=[502, 503, 504])
+retries = Retry(total=3, backoff_factor=2, status_forcelist=[502, 503, 504])
 adapter = HTTPAdapter(max_retries=retries)
 confluenceSession = requests.Session()
 confluenceSession.mount('http://', adapter)
