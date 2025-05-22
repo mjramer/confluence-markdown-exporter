@@ -44,7 +44,7 @@ To use the confluence-markdown-exporter, follow these steps:
 Install python package via pip.
 
 ```sh
-pip install confluence-markdown-exporter
+pip install confluence-markdown-exporter-advanced
 ```
 
 ### 2. Configure Authentication
@@ -75,12 +75,18 @@ export ATLASSIAN_URL="https://company.atlassian.net"
 
 ### 3. Exporting
 
-Run the exporter with the desired Confluence page ID or space key.
+Run the exporter with the desired Confluence page ID/URL or space key.
 
-Export a single Confluence page:
+Export a single Confluence page by URL:
 
 ```sh
-confluence-markdown-exporter page <page-id e.g. 645208921> <output path e.g. ./output_path/>
+confluence-markdown-exporter page-url <page-url e.g. https://company.atlassian.net/Wiki/foo/bar> <output path e.g. ./output_path/>
+```
+
+Export a single Confluence page by id:
+
+```sh
+confluence-markdown-exporter page-id <page-id e.g. 645208921> <output path e.g. ./output_path/>
 ```
 
 Export a Confluence page and all it's descendants:
