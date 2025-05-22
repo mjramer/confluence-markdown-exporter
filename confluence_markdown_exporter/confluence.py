@@ -13,8 +13,8 @@ from os import PathLike
 from pathlib import Path
 from string import Template
 from typing import Literal
-from typing import TypeAlias
 from typing import cast
+from typing import Optional, List, Dict, Union
 
 import yaml
 from atlassian import Confluence as ConfluenceApi
@@ -45,28 +45,23 @@ from urllib3.util.retry import Retry
 from requests.adapters import HTTPAdapter
 import logging
 
-JsonResponse: TypeAlias = dict
-StrPath: TypeAlias = str | PathLike[str]
+JsonResponse = dict
+StrPath = Union[str, PathLike]
 
 DEBUG: bool = bool(os.getenv("DEBUG"))
 
 
 class ApiSettings(BaseSettings):
-    atlassian_username: str | None = Field(default=None)
-    atlassian_password: str | None = Field(default=None)
-    atlassian_pat: str | None = Field(default=None)
+    atlassian_username: Optional[str] = Field(default=None)
+    atlassian_password: Optional[str] = Field(default=None)
+    atlassian_pat: Optional[str] = Field(default=None)
     atlassian_url: str = Field()
     confluence_timeout: int = Field(
         default=75,
         description="Timeout (in seconds) for Confluence API requests.",
         validation_alias="CONFLUENCE_TIMEOUT"
     )
-    confluence_timeout: int = Field(
-        default=75,
-        description="Timeout (in seconds) for Confluence API requests.",
-        validation_alias="CONFLUENCE_TIMEOUT"
-    )
-    session_cookie: str | None = Field(default=None)
+    session_cookie: Optional[str] = Field(default=None)
 
     @model_validator(mode="before")
     @classmethod
@@ -131,10 +126,6 @@ class ConverterSettings(BaseSettings):
         default=100,
         description="Maximum number of attachments to fetch per page. Default: 100.",
     )
-    attachment_limit: int = Field(
-        default=100,
-        description="Maximum number of attachments to fetch per page. Default: 100.",
-    )
     fetch_attachments: bool = Field(
         default=True,
         description="Whether to fetch attachments for each page. Set to False to skip attachment retrieval.",
@@ -187,6 +178,7 @@ if api_settings.session_cookie:
         path="/wiki"
     )
 if api_settings.atlassian_pat:
+    confluenceSession.headers.update({"Authorization": f"Bearer {api_settings.atlassian_pat}"})
     auth_args = {"token": api_settings.atlassian_pat}
 else:
     if api_settings.atlassian_username is None or api_settings.atlassian_password is None:
@@ -204,23 +196,23 @@ jira = Jira(url=api_settings.atlassian_url, **auth_args)
 class JiraIssue(BaseModel):
     key: str
     summary: str
-    description: str | None
+    description: Optional[str]
     status: str
 
     @classmethod
-    def from_json(cls, data: JsonResponse) -> "JiraIssue":
+    def from_json(cls, data: dict) -> "JiraIssue":
         fields = data.get("fields", {})
         return cls(
             key=data.get("key", ""),
             summary=fields.get("summary", ""),
-            description=fields.get("description", ""),
+            description=fields.get("description", None),
             status=fields.get("status", {}).get("name", ""),
         )
 
     @classmethod
     @functools.lru_cache(maxsize=100)
     def from_key(cls, issue_key: str) -> "JiraIssue":
-        issue_data = cast(JsonResponse, jira.get_issue(issue_key))
+        issue_data = cast(dict, jira.get_issue(issue_key))
         return cls.from_json(issue_data)
 
 
@@ -232,7 +224,7 @@ class User(BaseModel):
     email: str
 
     @classmethod
-    def from_json(cls, data: JsonResponse) -> "User":
+    def from_json(cls, data: dict) -> "User":
         return cls(
             account_id=data.get("accountId", ""),
             username=data.get("username", ""),
@@ -244,18 +236,18 @@ class User(BaseModel):
     @classmethod
     @functools.lru_cache(maxsize=100)
     def from_username(cls, username: str) -> "User":
-        return cls.from_json(cast(JsonResponse, confluence.get_user_details_by_username(username)))
+        return cls.from_json(cast(dict, confluence.get_user_details_by_username(username)))
 
     @classmethod
     @functools.lru_cache(maxsize=100)
     def from_userkey(cls, userkey: str) -> "User":
-        return cls.from_json(cast(JsonResponse, confluence.get_user_details_by_userkey(userkey)))
+        return cls.from_json(cast(dict, confluence.get_user_details_by_userkey(userkey)))
 
     @classmethod
     @functools.lru_cache(maxsize=100)
     def from_accountid(cls, accountid: str) -> "User":
         return cls.from_json(
-            cast(JsonResponse, confluence.get_user_details_by_accountid(accountid))
+            cast(dict, confluence.get_user_details_by_accountid(accountid))
         )
 
 
@@ -266,7 +258,7 @@ class Version(BaseModel):
     friendly_when: str
 
     @classmethod
-    def from_json(cls, data: JsonResponse) -> "Version":
+    def from_json(cls, data: dict) -> "Version":
         return cls(
             number=data.get("number", 0),
             by=User.from_json(data.get("by", {})),
@@ -276,17 +268,17 @@ class Version(BaseModel):
 
 
 class Organization(BaseModel):
-    spaces: list["Space"]
+    spaces: List["Space"]
 
     @property
-    def pages(self) -> list[int]:
+    def pages(self) -> List[int]:
         return [page for space in self.spaces for page in space.pages]
 
     def export(self, export_path: StrPath) -> None:
         export_pages(self.pages, export_path)
 
     @classmethod
-    def from_json(cls, data: JsonResponse) -> "Organization":
+    def from_json(cls, data: dict) -> "Organization":
         return cls(
             spaces=[Space.from_json(space) for space in data.get("results", [])],
         )
@@ -296,7 +288,7 @@ class Organization(BaseModel):
     def from_api(cls) -> "Organization":
         return cls.from_json(
             cast(
-                JsonResponse,
+                dict,
                 confluence.get_all_spaces(
                     space_type="global", space_status="current", expand="homepage"
                 ),
@@ -308,10 +300,10 @@ class Space(BaseModel):
     key: str
     name: str
     description: str
-    homepage: int | None  # Allow homepage to be None
+    homepage: Optional[int]  # Allow homepage to be None
 
     @property
-    def pages(self) -> list[int]:
+    def pages(self) -> List[int]:
         if self.homepage is None:
             return []
         homepage = Page.from_id(self.homepage)
@@ -321,7 +313,7 @@ class Space(BaseModel):
         export_pages(self.pages, export_path)
 
     @classmethod
-    def from_json(cls, data: JsonResponse) -> "Space":
+    def from_json(cls, data: dict) -> "Space":
         return cls(
             key=data.get("key", ""),
             name=data.get("name", ""),
@@ -332,7 +324,7 @@ class Space(BaseModel):
     @classmethod
     @functools.lru_cache(maxsize=100)
     def from_key(cls, space_key: str) -> "Space":
-        return cls.from_json(cast(JsonResponse, confluence.get_space(space_key, expand="homepage")))
+        return cls.from_json(cast(dict, confluence.get_space(space_key, expand="homepage")))
 
 
 class Label(BaseModel):
@@ -341,7 +333,7 @@ class Label(BaseModel):
     prefix: str
 
     @classmethod
-    def from_json(cls, data: JsonResponse) -> "Label":
+    def from_json(cls, data: dict) -> "Label":
         return cls(
             id=data.get("id", ""),
             name=data.get("name", ""),
@@ -352,10 +344,10 @@ class Label(BaseModel):
 class Document(BaseModel):
     title: str
     space: Space
-    ancestors: list[int]
+    ancestors: List[int]
 
     @property
-    def _template_vars(self) -> dict[str, str]:
+    def _template_vars(self) -> Dict[str, str]:
         homepage_id = str(self.space.homepage) if self.space.homepage is not None else ""
         homepage_title = (
             sanitize_filename(Page.from_id(self.space.homepage, fetch_attachments=False).title)
@@ -405,7 +397,7 @@ class Attachment(Document):
         return sanitize_filename(self.title)
 
     @property
-    def _template_vars(self) -> dict[str, str]:
+    def _template_vars(self) -> Dict[str, str]:
         return {
             **super()._template_vars,
             "attachment_id": str(self.id),
@@ -421,7 +413,7 @@ class Attachment(Document):
         return Path(filepath_template.safe_substitute(self._template_vars))
 
     @classmethod
-    def from_json(cls, data: JsonResponse) -> "Attachment":
+    def from_json(cls, data: dict) -> "Attachment":
         if DEBUG:
             print(f"Getting attachment '{data.get('title', '')}' with download_link '{data.get('_links', {}).get('download', '')}'")
 
@@ -471,14 +463,14 @@ class Page(Document):
     body: str
     body_export: str
     editor2: str
-    labels: list["Label"]
-    attachments: list["Attachment"]
+    labels: List["Label"]
+    attachments: List["Attachment"]
 
     @property
-    def descendants(self) -> list[int]:
+    def descendants(self) -> List[int]:
         url = f"rest/api/content/{self.id}/descendant/page"
         try:
-            response = cast(JsonResponse, confluence.get(url, params={"limit": 10000}))
+            response = cast(dict, confluence.get(url, params={"limit": 10000}))
             results = response.get("results", [])
         except HTTPError as e:
             if e.response.status_code == 404:  # noqa: PLR2004
@@ -510,14 +502,14 @@ class Page(Document):
 
     @property
     def html(self) -> str:
-        match converter_settings.markdown_style:
-            case "GFM":
-                return f"<h1>{self.title}</h1>{self.body}"
-            case "Obsidian":
-                return self.body
-            case _:
-                msg = f"Invalid markdown style: {converter_settings.markdown_style}"
-                raise ValueError(msg)
+        style = converter_settings.markdown_style
+        if style == "GFM":
+            return f"<h1>{self.title}</h1>{self.body}"
+        elif style == "Obsidian":
+            return self.body
+        else:
+            msg = f"Invalid markdown style: {converter_settings.markdown_style}"
+            raise ValueError(msg)
 
     @property
     def markdown(self) -> str:
@@ -582,11 +574,11 @@ class Page(Document):
     def get_attachment_by_file_id(self, file_id: str) -> Attachment:
         return next(attachment for attachment in self.attachments if attachment.file_id == file_id)
 
-    def get_attachments_by_title(self, title: str) -> list[Attachment]:
+    def get_attachments_by_title(self, title: str) -> List[Attachment]:
         return [attachment for attachment in self.attachments if attachment.title == title]
 
     @classmethod
-    def from_json(cls, data: JsonResponse, fetch_attachments: bool = True) -> "Page":
+    def from_json(cls, data: dict, fetch_attachments: bool = True) -> "Page":
         if DEBUG:
             print(f"Getting attachments for page {data.get('id', 0)} with title '{data.get('title', '')}'")
         all_attachments_results = []
@@ -599,7 +591,7 @@ class Page(Document):
             expand_param = ",".join(expand_fields)
             while True:
                 attachments_page = cast(
-                    JsonResponse,
+                    dict,
                     confluence.get_attachments_from_content(
                         data.get("id", 0), limit=limit, start=start, expand=expand_param
                     ),
@@ -638,7 +630,7 @@ class Page(Document):
         try:
             return cls.from_json(
                 cast(
-                    JsonResponse,
+                    dict,
                     confluence.get_page_by_id(
                         page_id,
                         expand="body.view,body.export_view,body.editor2,metadata.labels,"
@@ -692,15 +684,14 @@ class Page(Document):
         @property
         def markdown(self) -> str:
             md_body = self.convert(self.page.html)
-            match converter_settings.markdown_style:
-                case "GFM":
-                    return f"{self.front_matter}\n{self.breadcrumbs}\n{md_body}\n"
-                case "Obsidian":
-                    return f"{self.front_matter}\n{md_body}\n"
-                case _:
-                    msg = f"Invalid markdown style: {converter_settings.markdown_style}"
-                    raise ValueError(msg)
-            return None
+            style = converter_settings.markdown_style
+            if style == "GFM":
+                return f"{self.front_matter}\n{self.breadcrumbs}\n{md_body}\n"
+            elif style == "Obsidian":
+                return f"{self.front_matter}\n{md_body}\n"
+            else:
+                msg = f"Invalid markdown style: {converter_settings.markdown_style}"
+                raise ValueError(msg)
 
         @property
         def front_matter(self) -> str:
@@ -723,10 +714,10 @@ class Page(Document):
             )
 
         @property
-        def labels(self) -> list[str]:
+        def labels(self) -> List[str]:
             return [f"#{label.name}" for label in self.page.labels]
 
-        def set_page_properties(self, **props: list[str] | str | None) -> None:
+        def set_page_properties(self, **props: Union[List[str], str, None]) -> None:
             for key, value in props.items():
                 if value:
                     self.page_properties[sanitize_key(key)] = value
@@ -1032,7 +1023,7 @@ class Page(Document):
             # TODO can this be queries via REST API instead?
             # api.cql('label = "curated-dataset" and space = STRUCT and parent = 688816133', expand='metadata.properties')
             # data-macro-id="5836d104-f9e9-44cf-9d05-e332b86275c0"
-            # https://developer.atlassian.com/cloud/confluence/rest/v1/api-group-content---macro-body/#api-wiki-rest-api-content-id-history-version-macro-id-macroid-get
+            # https://developer.atlassian.com/cloud/confluence/rest/v1/api-group-content---macro-body/#api-wiki-rest-api-content-id-history-version-macroid-get
             # Find out how to fetch the macro content
 
             # TODO instead use markdown integrated front matter properties query
@@ -1080,7 +1071,7 @@ def page_from_url(url: str) -> Page:
         raise ValueError("Could not parse space key and page title from URL.")
 
     page_data = cast(
-        JsonResponse,
+        dict,
         confluence.get_page_by_title(space=space_key, title=page_title, expand='version'),
     )
 

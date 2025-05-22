@@ -12,7 +12,7 @@ license = { text = "MIT" }
 authors = [
     { name = "Forked by Max Ramer, original author Sebastian Penhouet" }
 ]
-requires-python = ">= 3.10"
+requires-python = ">= 3.9"
 dependencies = [
     'atlassian-python-api',
     'markdownify',
