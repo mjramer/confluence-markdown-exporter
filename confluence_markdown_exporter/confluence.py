@@ -38,6 +38,13 @@ from confluence_markdown_exporter.utils.export import sanitize_key
 from confluence_markdown_exporter.utils.export import save_file
 from confluence_markdown_exporter.utils.table_converter import TableConverter
 
+import requests
+import urllib.parse
+from requests.auth import HTTPBasicAuth
+from urllib3.util.retry import Retry
+from requests.adapters import HTTPAdapter
+import logging
+
 JsonResponse: TypeAlias = dict
 StrPath: TypeAlias = str | PathLike[str]
 
@@ -46,7 +53,7 @@ DEBUG: bool = bool(os.getenv("DEBUG"))
 
 class ApiSettings(BaseSettings):
     atlassian_username: str | None = Field(default=None)
-    atlassian_api_token: str | None = Field(default=None)
+    atlassian_password: str | None = Field(default=None)
     atlassian_pat: str | None = Field(default=None)
     atlassian_url: str = Field()
     confluence_timeout: int = Field(
@@ -54,6 +61,12 @@ class ApiSettings(BaseSettings):
         description="Timeout (in seconds) for Confluence API requests.",
         validation_alias="CONFLUENCE_TIMEOUT"
     )
+    confluence_timeout: int = Field(
+        default=75,
+        description="Timeout (in seconds) for Confluence API requests.",
+        validation_alias="CONFLUENCE_TIMEOUT"
+    )
+    session_cookie: str | None = Field(default=None)
 
     @model_validator(mode="before")
     @classmethod
@@ -61,10 +74,13 @@ class ApiSettings(BaseSettings):
         if "atlassian_pat" in data:
             return data
 
-        if "atlassian_username" in data and "atlassian_api_token" in data:
+        if "atlassian_username" in data and "atlassian_password" in data:
             return data
 
-        msg = "Either ATLASSIAN_PAT or both ATLASSIAN_USERNAME and ATLASSIAN_API_TOKEN must be set."
+        if "session_cookie" in data:
+            return data
+
+        msg = "Must set environment vars: (SESSION_COOKIE) && ( ATLASSIAN_PAT || (ATLASSIAN_USERNAME and ATLASSIAN_PASSWORD) )"
         raise ValueError(msg)
 
     model_config = SettingsConfigDict(env_file=".env")
@@ -115,6 +131,18 @@ class ConverterSettings(BaseSettings):
         default=100,
         description="Maximum number of attachments to fetch per page. Default: 100.",
     )
+    attachment_limit: int = Field(
+        default=100,
+        description="Maximum number of attachments to fetch per page. Default: 100.",
+    )
+    fetch_attachments: bool = Field(
+        default=True,
+        description="Whether to fetch attachments for each page. Set to False to skip attachment retrieval.",
+    )
+    search_ancestor_attachments: bool = Field(
+        default=False,
+        description="Whether to search ancestor pages for attachments. Set to False to only search the current page.",
+    )
 
 
 try:
@@ -122,7 +150,7 @@ try:
 except ValidationError:
     print(
         "Please set the required environment variables: "
-        "ATLASSIAN_URL and either both ATLASSIAN_USERNAME and ATLASSIAN_API_TOKEN"
+        "ATLASSIAN_URL and either both ATLASSIAN_USERNAME and ATLASSIAN_PASSWORD"
         "or ATLASSIAN_PAT\n\n"
         "Read the README.md for more information."
     )
@@ -130,15 +158,46 @@ except ValidationError:
 
 converter_settings = ConverterSettings()
 
+class LoggingHTTPAdapter(HTTPAdapter):
+    def send(self, request, **kwargs):
+        retry_count = 0
+        while True:
+            try:
+                response = super().send(request, **kwargs)
+                return response
+            except Exception as e:
+                if DEBUG:
+                    retry_count += 1
+                    logging.warning(
+                        f"Request to {request.url} failed (attempt {retry_count}): {e!r}"
+                    )
+                raise
+
+retries = Retry(total=10, backoff_factor=2, backoff_max=60, status_forcelist=[502, 503, 504])
+adapter = HTTPAdapter(max_retries=retries)
+confluenceSession = requests.Session()
+confluenceSession.mount('http://', adapter)
+confluenceSession.mount('https://', adapter)
+
+if api_settings.session_cookie:
+    confluenceSession.cookies.set(
+        "JSESSIONID",
+        api_settings.session_cookie,
+        domain=urllib.parse.urlparse(api_settings.atlassian_url).hostname,
+        path="/wiki"
+    )
 if api_settings.atlassian_pat:
     auth_args = {"token": api_settings.atlassian_pat}
 else:
+    if api_settings.atlassian_username is None or api_settings.atlassian_password is None:
+        raise ValueError("ATLASSIAN_USERNAME and ATLASSIAN_PASSWORD must not be None when using basic auth.")
+    confluenceSession.auth = HTTPBasicAuth(api_settings.atlassian_username, api_settings.atlassian_password)
     auth_args = {
         "username": api_settings.atlassian_username,
-        "password": api_settings.atlassian_api_token,
+        "password": api_settings.atlassian_password,
     }
 
-confluence = ConfluenceApi(url=api_settings.atlassian_url, timeout=api_settings.confluence_timeout, **auth_args)
+confluence = ConfluenceApi(url=api_settings.atlassian_url, session=confluenceSession, timeout=api_settings.confluence_timeout)
 jira = Jira(url=api_settings.atlassian_url, **auth_args)
 
 
@@ -249,10 +308,12 @@ class Space(BaseModel):
     key: str
     name: str
     description: str
-    homepage: int
+    homepage: int | None  # Allow homepage to be None
 
     @property
     def pages(self) -> list[int]:
+        if self.homepage is None:
+            return []
         homepage = Page.from_id(self.homepage)
         return [self.homepage, *homepage.descendants]
 
@@ -265,7 +326,7 @@ class Space(BaseModel):
             key=data.get("key", ""),
             name=data.get("name", ""),
             description=data.get("description", {}).get("plain", {}).get("value", ""),
-            homepage=data.get("homepage", {}).get("id"),
+            homepage=data.get("homepage", {}).get("id") if data.get("homepage") else None,
         )
 
     @classmethod
@@ -295,15 +356,26 @@ class Document(BaseModel):
 
     @property
     def _template_vars(self) -> dict[str, str]:
+        homepage_id = str(self.space.homepage) if self.space.homepage is not None else ""
+        homepage_title = (
+            sanitize_filename(Page.from_id(self.space.homepage, fetch_attachments=False).title)
+            if self.space.homepage is not None and converter_settings.search_ancestor_attachments
+            else ""
+        )
+        ancestor_ids = "/".join(str(a) for a in self.ancestors)
+        if converter_settings.search_ancestor_attachments:
+            ancestor_titles = "/".join(
+                sanitize_filename(Page.from_id(a, fetch_attachments=False).title) for a in self.ancestors
+            )
+        else:
+            ancestor_titles = ""
         return {
             "space_key": sanitize_filename(self.space.key),
             "space_name": sanitize_filename(self.space.name),
-            "homepage_id": str(self.space.homepage),
-            "homepage_title": sanitize_filename(Page.from_id(self.space.homepage).title),
-            "ancestor_ids": "/".join(str(a) for a in self.ancestors),
-            "ancestor_titles": "/".join(
-                sanitize_filename(Page.from_id(a).title) for a in self.ancestors
-            ),
+            "homepage_id": homepage_id,
+            "homepage_title": homepage_title,
+            "ancestor_ids": ancestor_ids,
+            "ancestor_titles": ancestor_titles,
         }
 
 
@@ -329,7 +401,8 @@ class Attachment(Document):
 
     @property
     def filename(self) -> str:
-        return f"{self.file_id}{self.extension}"
+        # Use the sanitized title as the filename, do NOT add extension
+        return sanitize_filename(self.title)
 
     @property
     def _template_vars(self) -> dict[str, str]:
@@ -339,6 +412,7 @@ class Attachment(Document):
             "attachment_title": sanitize_filename(self.title),
             "attachment_file_id": sanitize_filename(self.file_id),
             "attachment_extension": self.extension,
+            "attachment_filename": self.filename,
         }
 
     @property
@@ -348,6 +422,9 @@ class Attachment(Document):
 
     @classmethod
     def from_json(cls, data: JsonResponse) -> "Attachment":
+        if DEBUG:
+            print(f"Getting attachment '{data.get('title', '')}' with download_link '{data.get('_links', {}).get('download', '')}'")
+
         extensions = data.get("extensions", {})
         container = data.get("container", {})
         return cls(
@@ -369,15 +446,18 @@ class Attachment(Document):
         )
 
     def export(self, export_path: StrPath) -> None:
+        # Always join export_path and export_path (which is relative)
         filepath = Path(export_path) / self.export_path
+        filepath.parent.mkdir(parents=True, exist_ok=True)  # Ensure directories exist
+
         if filepath.exists():
             return
 
         try:
             response = confluence._session.get(str(confluence.url + self.download_link))
             response.raise_for_status()  # Raise error if request fails
-        except HTTPError:
-            print(f"There is no attachment with title '{self.title}'. Skipping export.")
+        except HTTPError as e:
+            print(f"There is no attachment with title '{self.title}'. Skipping export. HTTPError: {e}")
             return
 
         save_file(
@@ -506,15 +586,37 @@ class Page(Document):
         return [attachment for attachment in self.attachments if attachment.title == title]
 
     @classmethod
-    def from_json(cls, data: JsonResponse) -> "Page":
-        attachments = cast(
-            JsonResponse,
-            confluence.get_attachments_from_content(
-                data.get("id", 0),
-                limit=converter_settings.attachment_limit,
-                expand="container.ancestors,version",
-            ),
-        )
+    def from_json(cls, data: JsonResponse, fetch_attachments: bool = True) -> "Page":
+        if DEBUG:
+            print(f"Getting attachments for page {data.get('id', 0)} with title '{data.get('title', '')}'")
+        all_attachments_results = []
+        start = 0
+        limit = converter_settings.attachment_limit
+        if fetch_attachments:
+            expand_fields = ["version"]
+            if converter_settings.search_ancestor_attachments:
+                expand_fields.insert(0, "container.ancestors")
+            expand_param = ",".join(expand_fields)
+            while True:
+                attachments_page = cast(
+                    JsonResponse,
+                    confluence.get_attachments_from_content(
+                        data.get("id", 0), limit=limit, start=start, expand=expand_param
+                    ),
+                )
+                current_results = attachments_page.get("results", [])
+                all_attachments_results.extend(current_results)
+                if len(current_results) < limit or "next" not in attachments_page.get("_links", {}):
+                    break
+                start += limit
+            # Only create Attachment objects once, after all results are collected
+            attachments = [
+                Attachment.from_json(attachment) for attachment in all_attachments_results
+            ]
+            if DEBUG:
+                print(f"Got {len(attachments)} attachments for page {data.get('id', 0)}")
+        else:
+            attachments = []
         return cls(
             id=data.get("id", 0),
             title=data.get("title", ""),
@@ -526,15 +628,13 @@ class Page(Document):
                 Label.from_json(label)
                 for label in data.get("metadata", {}).get("labels", {}).get("results", [])
             ],
-            attachments=[
-                Attachment.from_json(attachment) for attachment in attachments.get("results", [])
-            ],
+            attachments=attachments,
             ancestors=[ancestor.get("id") for ancestor in data.get("ancestors", [])][1:],
         )
 
     @classmethod
     @functools.lru_cache(maxsize=1000)
-    def from_id(cls, page_id: int) -> "Page":
+    def from_id(cls, page_id: int, fetch_attachments: bool = True) -> "Page":
         try:
             return cls.from_json(
                 cast(
@@ -544,15 +644,16 @@ class Page(Document):
                         expand="body.view,body.export_view,body.editor2,metadata.labels,"
                         "metadata.properties,ancestors",
                     ),
-                )
+                ),
+                fetch_attachments=fetch_attachments,
             )
         except ApiError as e:
             print(f"WARNING: Could not access page with ID {page_id}: {e!s}")
             # Return a minimal page object with error information
             return cls(
-                id=page_id,
+                id=page_id if page_id is not None else -1,
                 title="[Error: Page not accessible]",
-                space=Space(key="", name="", description="", homepage=0),
+                space=Space(key="", name="", description="", homepage=None),
                 body="",
                 body_export="",
                 editor2="",
@@ -967,3 +1068,20 @@ def export_pages(page_ids: list[int], output_path: StrPath) -> None:
     for page_id in (pbar := tqdm(page_ids, smoothing=0.05)):
         pbar.set_postfix_str(f"Exporting page {page_id}")
         export_page(page_id, output_path)
+
+def page_from_url(url: str) -> Page:
+    """
+    Retrieve a Page object given a Confluence page URL.
+    """
+    try:
+        page_title = urllib.parse.unquote_plus(url.strip('/').split('/')[-1])
+        space_key = urllib.parse.unquote_plus(url.strip('/').split('/')[-2])
+    except (ValueError, IndexError):
+        raise ValueError("Could not parse space key and page title from URL.")
+
+    page_data = cast(
+        JsonResponse,
+        confluence.get_page_by_title(space=space_key, title=page_title, expand='version'),
+    )
+
+    return Page.from_id(page_data['id'])

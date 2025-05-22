@@ -8,6 +8,7 @@ from confluence_markdown_exporter.confluence import Organization
 from confluence_markdown_exporter.confluence import Page
 from confluence_markdown_exporter.confluence import Space
 from confluence_markdown_exporter.utils.measure_time import measure
+from confluence_markdown_exporter.confluence import page_from_url
 
 DEBUG: bool = bool(os.getenv("DEBUG"))
 
@@ -15,23 +16,23 @@ app = typer.Typer()
 
 
 @app.command()
-def page(
+def page_url(
+    page_url: Annotated[str, typer.Argument()],
+    output_path: Annotated[Path, typer.Argument()] = Path("."),
+) -> None:
+    with measure(f"Export page {page_url}"):
+        _page = page_from_url(page_url)
+        _page.export(output_path)
+
+
+@app.command()
+def page_id(
     page_id: Annotated[int, typer.Argument()],
     output_path: Annotated[Path, typer.Argument()] = Path("."),
 ) -> None:
     with measure(f"Export page {page_id}"):
         _page = Page.from_id(page_id)
         _page.export(output_path)
-
-
-@app.command()
-def page_with_descendants(
-    page_id: Annotated[int, typer.Argument()],
-    output_path: Annotated[Path, typer.Argument()] = Path("."),
-) -> None:
-    with measure(f"Export page {page_id} with descendants"):
-        _page = Page.from_id(page_id)
-        _page.export_with_descendants(output_path)
 
 
 @app.command()
